@@ -1,0 +1,8 @@
+# 不要提交任何金鑰、設定、對話紀錄或本機資料
+settings.json
+*.env
+.env*
+*.jsonl
+data/
+node_modules/
+*.log
