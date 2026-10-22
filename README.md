@@ -17,7 +17,7 @@
 給 [Toonflow](https://github.com/HBAI-Ltd/Toonflow-app) v2 的社群客製：兩個媒體供應商（Fal AI、OpenRouter）與 `v118workflow`、`workflow` 兩個內建技能的修補版。**非官方，也不是 HBAI-Ltd 發佈。** 沒有任何金鑰，金鑰自己填。
 
 - 適用版本：Toonflow 2.0.6、2.0.7。
-- 驗證程度：在 Docker 版驗證過載入；桌面版沒有測。Fal 供應商只有「H3 Max Turbo 圖生視頻」被真實呼叫驗證過，其餘端點（含 Seedance、Wan）依官方規格寫成並以模擬回應測試，未實測；技能修補尚未做過第三方實測。
+- 驗證程度：在 Docker 版驗證過載入；桌面版沒有測。Fal 供應商只有「H3 Max Turbo 圖生視頻」與「Wan 3.0 參考生視頻（含聲音）」被真實呼叫驗證過，其餘端點（含 Seedance、H3 文生視頻與對嘴）依官方規格寫成並以模擬回應測試，未實測；技能修補尚未做過第三方實測。
 
 ## 裡面有什麼
 
@@ -25,8 +25,8 @@
 |---|---|
 | `dist/v118workflowPlus.zip` | 可本地安裝的技能：`v118workflow` 修補版，新名稱，與原技能並存 |
 | `dist/workflowPlus.zip` | 可本地安裝的技能：`workflow`（主流程）加一致性鐵則，**另加 Wan 3.0 與 H3 的分段提示詞模板（A9.3、A9.4）**；使用者指定 Wan 或 H3 時解除 Seedance 路由鎖存。新名稱，與原技能並存 |
-| `providers/falAi.ts` | Fal AI：H3、H3 Max、H3 Max Turbo（圖生與參考生視頻）、Wan 3.0（圖生、文生、參考生）、**Seedance 2.0 與 2.5（圖生、文生、參考生）**、Nano Banana Pro、GPT Image 2，共 17 個模型 |
-| `providers/openRouter.ts` | OpenRouter **媒體**供應商：Qwen、Gemini、GPT 圖像；H3、H3 Max、Wan 3.0 圖生視頻，共 8 個模型。**不含文字模型** |
+| `providers/falAi.ts` | Fal AI：H3、H3 Max、H3 Max Turbo（圖生、文生與參考生視頻）、H3 Max 對嘴（人物圖＋音訊）、Wan 3.0（圖生、文生、參考生）、**Seedance 2.0 與 2.5（圖生、文生、參考生）**、Nano Banana Pro、GPT Image 2，共 21 個模型。Wan 與 Seedance 在節點上可切換「生成音頻」，H3 一律有聲音 |
+| `providers/openRouter.ts` | OpenRouter **媒體**供應商：Qwen、Gemini、GPT 圖像；H3、H3 Max、Wan 3.0 圖生視頻，共 8 個模型。H3 與 Wan 3.0 可切換「生成音頻」，H3 Max 沒有聲音。**不含文字模型** |
 | `skills-patched/` | 修補過的檔案原文（便於看差異與手動合併） |
 | `tools/check_refs.mjs` | 選用，需要 Node：讀畫布 JSON，列出每個生成節點實際連了哪些參考、視頻模式 |
 

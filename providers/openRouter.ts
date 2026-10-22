@@ -436,6 +436,7 @@ export default {
       "id": "minimax/hailuo-3",
       "label": "MiniMax H3（首帧图生视频，末帧可选）",
       "type": "video",
+      "audio": "optional",
       "mode": [
         "endFrameOptional"
       ],
@@ -464,6 +465,7 @@ export default {
       "id": "minimax/hailuo-3-max",
       "label": "MiniMax H3 Max（首帧图生视频，末帧可选）",
       "type": "video",
+      "audio": false,
       "mode": [
         "endFrameOptional"
       ],
@@ -493,6 +495,7 @@ export default {
       "id": "alibaba/wan-3.0",
       "label": "Wan 3.0（首帧图生视频，末帧可选，2~30 秒）",
       "type": "video",
+      "audio": "optional",
       "mode": [
         "endFrameOptional"
       ],

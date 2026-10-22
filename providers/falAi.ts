@@ -69,6 +69,10 @@ interface VideoModelOptions {
   reference?: boolean;
   // 参考端点是否还接受首帧 / 末帧（fal 上只有 H3 Max 的参考端点接受）
   frames?: boolean;
+  // H3 文生视频：不收图，比例 21:9～9:16（没有 adaptive），可带 1 段目标音频（target_audio_url）
+  t2v?: boolean;
+  // H3 Max 对嘴：只收 1 张图 + 1 段音频，没有提示词，时长跟随音频
+  lipsync?: boolean;
 }
 
 const REFERENCE_LIMITS = { images: 9, videos: 3, audios: 3, total: 12 };
@@ -83,7 +87,7 @@ const IMAGE_TOTAL_TIMEOUT_MS = 10 * 60 * 1000;
 const VIDEO_TOTAL_TIMEOUT_MS = 20 * 60 * 1000;
 
 const IMAGE_RESERVED = ["prompt", "image_urls", "mask_url", "num_images", "aspect_ratio", "resolution", "image_size", "quality", "output_format", "sync_mode"];
-const VIDEO_RESERVED = ["prompt", "start_image_url", "audio", "image_url", "end_image_url", "duration", "resolution", "aspect_ratio", "sync_mode", "reference_image_urls", "reference_video_urls", "reference_audio_urls", "reference_conditions", "image_urls", "video_urls", "audio_urls", "generate_audio"];
+const VIDEO_RESERVED = ["prompt", "start_image_url", "audio", "image_url", "end_image_url", "duration", "resolution", "aspect_ratio", "sync_mode", "reference_image_urls", "reference_video_urls", "reference_audio_urls", "reference_conditions", "image_urls", "video_urls", "audio_urls", "generate_audio", "audio_url", "target_audio_url"];
 
 const NANO_RATIOS = ["auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16"];
 // GPT Image 2 在 fal 上只公布 7 个预设尺寸，这里只暴露能与之一一对应的比例
@@ -158,6 +162,35 @@ const VIDEO_MODELS: Record<string, VideoModelOptions> = {
     minDuration: 3,
     maxDuration: 15,
     reference: true,
+  },
+  // 2026-10-22 依 fal 官方 API 页补上：文生视频三个、H3 Max 对嘴一个
+  "minimax/h3/text-to-video": {
+    endpoint: "minimax/h3/text-to-video",
+    resolutions: ["480P", "768P", "2K", "4K"],
+    minDuration: 5,
+    maxDuration: 15,
+    t2v: true,
+  },
+  "minimax/h3-max/text-to-video": {
+    endpoint: "minimax/h3-max/text-to-video",
+    resolutions: ["480P", "768P", "1080P"],
+    minDuration: 3,
+    maxDuration: 15,
+    t2v: true,
+  },
+  "minimax/h3-max-turbo/text-to-video": {
+    endpoint: "minimax/h3-max-turbo/text-to-video",
+    resolutions: ["480P", "768P", "1080P"],
+    minDuration: 3,
+    maxDuration: 15,
+    t2v: true,
+  },
+  "minimax/h3-max/lip-sync/image-to-video": {
+    endpoint: "minimax/h3-max/lip-sync/image-to-video",
+    resolutions: ["480P", "768P", "1080P", "2K"],
+    minDuration: 5,
+    maxDuration: 900,
+    lipsync: true,
   },
   "alibaba/wan-3.0/image-to-video": {
     endpoint: "alibaba/wan-3.0/image-to-video",
@@ -532,6 +565,34 @@ async function generateSeedanceVideo(context: ProviderContext, request: VideoReq
 }
 
 // Wan 3.0：start_image_url / end_image_url、audio 布尔开关、小写分辨率、时长 2~30 秒整数、比例含 adaptive
+// H3 Max 对嘴：image_url + audio_url，没有提示词与比例；输出时长等于音频长度（音频 5 秒～15 分钟）。
+// 节点会带时长与比例，这里不送（fal 不收），以音频为准。
+async function generateLipSyncVideo(context: ProviderContext, request: VideoRequest, options: VideoModelOptions): Promise<MediaAsset[]> {
+  if (request.videos && request.videos.length) throw new Error("对嘴模型不接受参考视频");
+  const images = request.images ?? [];
+  const audios = request.audios ?? [];
+  const image = request.firstFrame ?? images[0];
+  if (!image || images.length > 1) throw new Error("对嘴需要刚好 1 张人物图（可用首帧或 1 张参考图）");
+  if (audios.length !== 1) throw new Error("对嘴需要刚好 1 段音频（至少 5 秒），画面的嘴型会跟着它动，成片时长等于音频长度");
+  const body: Json = {
+    image_url: toFileUrl(image, "人物图", "image/png"),
+    audio_url: toFileUrl(audios[0], "对嘴音频", "audio/mpeg"),
+  };
+  if (request.resolution !== undefined) {
+    const resolution = request.resolution.toUpperCase();
+    if (!options.resolutions.includes(resolution)) throw new Error("该模型不支持分辨率 " + request.resolution + "，可选：" + options.resolutions.join("、"));
+    body.resolution = resolution;
+  }
+  mergeOther(body, request.other, VIDEO_RESERVED);
+  const result = await runQueue(context, options.endpoint, body, VIDEO_TOTAL_TIMEOUT_MS, "视频生成");
+  const video = asRecord(result.video);
+  const url = video ? firstUrl(video.url) : "";
+  if (!url) throw new Error("Fal 未返回视频地址");
+  const file = await downloadBinary(context, url, video?.content_type, "video/", "video/mp4");
+  throwIfAborted(context.signal);
+  return [{ mediaType: "video", type: "binary", data: file.bytes, mimeType: file.mimeType }];
+}
+
 async function generateWanVideo(context: ProviderContext, request: VideoRequest, options: VideoModelOptions, prompt: string): Promise<MediaAsset[]> {
   // 提示词改写默认关闭，保证台词与动作原样送达。fal 文档提示关闭可能降低画质，需要时可在扩展参数传 enable_prompt_expansion: true
   const body: Json = { prompt, enable_prompt_expansion: false, sync_mode: false };
@@ -617,6 +678,11 @@ export default {
 - 音频参考的实际效果（是否能固定角色声音）尚未实测。
 
 - 画幅跟随输入图，没有单独的比例参数；提示词改写默认关闭（\`prompt_expansion_mode: disabled\`），需要时可在扩展参数里传 \`balanced\` 或 \`quality\`。
+**视频（MiniMax H3 文生视频与对嘴，2026-10-22 补上）**
+- 文生视频：\`minimax/h3/text-to-video\`（5~15 秒，480P / 768P / 2K / 4K，默认 2K）、\`minimax/h3-max/text-to-video\` 与 \`minimax/h3-max-turbo/text-to-video\`（480P / 768P / 1080P；fal 没写时长范围，这里比照同型号图生视频开放 3~15 秒）。比例 21:9、16:9、4:3、1:1、3:4、9:16（没有 adaptive，默认 16:9）。可带 1 段音频（至少 2 秒、最大 15 MB）当成片音轨（\`target_audio_url\`）。
+- 对嘴：\`minimax/h3-max/lip-sync/image-to-video\`，1 张人物图（长宽比 0.4~2.5）+ 1 段音频（5 秒～15 分钟），嘴型跟着音频动，成片时长等于音频长度；没有提示词与比例，节点上的时长、比例不会送出。分辨率 480P / 768P / 1080P / 2K（默认 768P）。扩展参数可传 \`enable_transcription: true\`（先转写音频再对嘴）。
+- 以上四个端点尚未实际调用验证。
+
 - fal 没有「是否生成音频」的开关；文档只公布了 \`target_audio_url\`（用指定音频替换输出音轨），没有明文说明会生成对白或音效。使用者观察 fal 页面的 H3 Max 与 Turbo 示范影片都带说话与音效，但本接入尚未实测；以实际生成结果为准。
 
 **视频（Wan 3.0，阿里）**
@@ -667,6 +733,7 @@ export default {
       id: "minimax/h3/image-to-video",
       label: "MiniMax H3（首帧图生视频，末帧可选）",
       type: "video",
+      audio: true, // fal 的 H3 一律生成聲音（音效、對白可對嘴），沒有開關（依 fal 範例影片）
       mode: ["endFrameOptional"],
       durationResolutionMap: [{ duration: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "2K", "4K"] }],
     },
@@ -674,6 +741,7 @@ export default {
       id: "minimax/h3-max/image-to-video",
       label: "MiniMax H3 Max（首帧图生视频，末帧可选）",
       type: "video",
+      audio: true, // fal 的 H3 一律生成聲音（音效、對白可對嘴），沒有開關（依 fal 範例影片）
       mode: ["endFrameOptional"],
       durationResolutionMap: [{ duration: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "1080P"] }],
     },
@@ -681,6 +749,7 @@ export default {
       id: "minimax/h3-max-turbo/image-to-video",
       label: "MiniMax H3 Max Turbo（首帧图生视频，末帧可选）",
       type: "video",
+      audio: true, // fal 的 H3 一律生成聲音（音效、對白可對嘴），沒有開關（依 fal 範例影片）
       mode: ["endFrameOptional"],
       durationResolutionMap: [{ duration: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "1080P"] }],
     },
@@ -688,6 +757,7 @@ export default {
       id: "minimax/h3/reference-to-video",
       label: "MiniMax H3 参考生视频（图 9 / 视频 3 / 音频 3）",
       type: "video",
+      audio: true, // fal 的 H3 一律生成聲音（音效、對白可對嘴），沒有開關（依 fal 範例影片）
       mode: ["text", ["imageReference:9", "videoReference:3", "audioReference:3"]],
       durationResolutionMap: [{ duration: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "2K", "4K"] }],
     },
@@ -695,6 +765,7 @@ export default {
       id: "minimax/h3-max/reference-to-video",
       label: "MiniMax H3 Max 参考生视频（图 9 / 视频 3 / 音频 3，可加首末帧）",
       type: "video",
+      audio: true, // fal 的 H3 一律生成聲音（音效、對白可對嘴），沒有開關（依 fal 範例影片）
       mode: ["text", ["imageReference:9", "videoReference:3", "audioReference:3"]],
       durationResolutionMap: [{ duration: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "1080P"] }],
     },
@@ -702,6 +773,7 @@ export default {
       id: "alibaba/wan-3.0/image-to-video",
       label: "Wan 3.0 图生视频（首帧必填，末帧可选，2~30 秒，可开关声音）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["endFrameOptional"],
       durationResolutionMap: [{ duration: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], resolution: ["480p", "720p", "1080p"] }],
     },
@@ -709,6 +781,7 @@ export default {
       id: "alibaba/wan-3.0/text-to-video",
       label: "Wan 3.0 文生视频（2~30 秒，可开关声音）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["text"],
       durationResolutionMap: [{ duration: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], resolution: ["480p", "720p", "1080p"] }],
     },
@@ -716,6 +789,7 @@ export default {
       id: "alibaba/wan-3.0/reference-to-video",
       label: "Wan 3.0 参考生视频（图 10 / 视频 5 / 音频 5，2~30 秒）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["text", ["imageReference:10", "videoReference:5", "audioReference:5"]],
       durationResolutionMap: [{ duration: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], resolution: ["480p", "720p", "1080p"] }],
     },
@@ -723,6 +797,7 @@ export default {
       id: "bytedance/seedance-2.0/image-to-video",
       label: "Seedance 2.0 图生视频（首帧必填，末帧可选，4~15 秒，可开关声音）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["endFrameOptional"],
       durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "720p", "1080p", "4k"] }],
     },
@@ -730,6 +805,7 @@ export default {
       id: "bytedance/seedance-2.0/text-to-video",
       label: "Seedance 2.0 文生视频（4~15 秒，可开关声音）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["text"],
       durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "720p", "1080p", "4k"] }],
     },
@@ -737,6 +813,7 @@ export default {
       id: "bytedance/seedance-2.0/reference-to-video",
       label: "Seedance 2.0 参考生视频（图 9 / 视频 3 / 音频 3，4~15 秒）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["text", ["imageReference:9", "videoReference:3", "audioReference:3"]],
       durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "720p", "1080p", "4k"] }],
     },
@@ -744,6 +821,7 @@ export default {
       id: "bytedance/seedance-2.5/image-to-video",
       label: "Seedance 2.5 图生视频（首帧必填，末帧可选，4~30 秒，可开关声音）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["endFrameOptional"],
       durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], resolution: ["480p", "720p", "1080p"] }],
     },
@@ -751,6 +829,7 @@ export default {
       id: "bytedance/seedance-2.5/text-to-video",
       label: "Seedance 2.5 文生视频（4~30 秒，可开关声音）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["text"],
       durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], resolution: ["480p", "720p", "1080p"] }],
     },
@@ -758,6 +837,7 @@ export default {
       id: "bytedance/seedance-2.5/reference-to-video",
       label: "Seedance 2.5 参考生视频（图 30 / 视频 10 / 音频 10，4~30 秒）",
       type: "video",
+      audio: "optional", // fal 有聲音開關（wan：audio，seedance：generate_audio），節點才能切換「生成音頻」
       mode: ["text", ["imageReference:30", "videoReference:10", "audioReference:10"]],
       durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], resolution: ["480p", "720p", "1080p"] }],
     },
@@ -765,8 +845,41 @@ export default {
       id: "minimax/h3-max-turbo/reference-to-video",
       label: "MiniMax H3 Max Turbo 参考生视频（图 9 / 视频 3 / 音频 3）",
       type: "video",
+      audio: true, // fal 的 H3 一律生成聲音（音效、對白可對嘴），沒有開關（依 fal 範例影片）
       mode: ["text", ["imageReference:9", "videoReference:3", "audioReference:3"]],
       durationResolutionMap: [{ duration: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "1080P"] }],
+    },
+    {
+      id: "minimax/h3/text-to-video",
+      label: "MiniMax H3 文生视频（5~15 秒；可带 1 段音频当成片音轨）",
+      type: "video",
+      audio: true, // fal 的 H3 一律生成聲音，沒有開關
+      mode: ["text", ["audioReference:1"]],
+      durationResolutionMap: [{ duration: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "2K", "4K"] }],
+    },
+    {
+      id: "minimax/h3-max/text-to-video",
+      label: "MiniMax H3 Max 文生视频（3~15 秒；可带 1 段音频当成片音轨）",
+      type: "video",
+      audio: true, // fal 的 H3 一律生成聲音，沒有開關
+      mode: ["text", ["audioReference:1"]],
+      durationResolutionMap: [{ duration: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "1080P"] }],
+    },
+    {
+      id: "minimax/h3-max-turbo/text-to-video",
+      label: "MiniMax H3 Max Turbo 文生视频（3~15 秒；可带 1 段音频当成片音轨）",
+      type: "video",
+      audio: true, // fal 的 H3 一律生成聲音，沒有開關
+      mode: ["text", ["audioReference:1"]],
+      durationResolutionMap: [{ duration: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "1080P"] }],
+    },
+    {
+      id: "minimax/h3-max/lip-sync/image-to-video",
+      label: "MiniMax H3 Max 对嘴（1 张人物图 + 1 段音频；时长跟随音频，节点的时长设定不生效）",
+      type: "video",
+      audio: true, // 成片音軌就是傳入的音訊
+      mode: [["imageReference:1", "audioReference:1"]],
+      durationResolutionMap: [{ duration: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480P", "768P", "1080P", "2K"] }],
     },
   ],
 
@@ -860,6 +973,7 @@ export default {
     const options = VIDEO_MODELS[request.model];
     if (!options) throw new Error("不支持的视频模型：" + String(request.model));
     const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
+    if (options.lipsync) return generateLipSyncVideo(this, request, options);
     if (!prompt) throw new Error("请填写视频提示词");
 
     if (options.wan) return generateWanVideo(this, request, options, prompt);
@@ -889,6 +1003,16 @@ export default {
       }
       if (request.ratio !== undefined) {
         if (!["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"].includes(request.ratio)) throw new Error("该模型不支持比例 " + request.ratio);
+        body.aspect_ratio = request.ratio;
+      }
+    } else if (options.t2v) {
+      if ((request.images && request.images.length) || request.firstFrame || request.lastFrame) {
+        throw new Error("文生视频不接受图片，要用图请改用 image-to-video 或 reference-to-video 模型");
+      }
+      if (request.videos && request.videos.length) throw new Error("文生视频不接受参考视频");
+      if (request.audios && request.audios.length > 1) throw new Error("文生视频最多只接受 1 段目标音频（会成为成片音轨）");
+      if (request.ratio !== undefined) {
+        if (!["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"].includes(request.ratio)) throw new Error("该模型不支持比例 " + request.ratio + "，可选：21:9、16:9、4:3、1:1、3:4、9:16");
         body.aspect_ratio = request.ratio;
       }
     } else {
